@@ -1,0 +1,13 @@
+{
+  "sources": {
+    "ProofChain": {"enabled": true, "sheet_csv_url": "https://docs.google.com/spreadsheets/d/1cyv_cH8zdYMkcBzqvnJPTU1AslJfIx5-MT-Dl-T1LKI/export?format=csv&gid=0"},
+    "SEC":        {"enabled": true, "edgar_rss": true},
+    "SAM":        {"enabled": true, "api_url": "https://api.sam.gov/prod/opportunities/v1/search", "api_key": "PASTE_API_KEY"},
+    "FAST41":     {"enabled": true, "api_url": "https://www.permitting.gov/api/projects"},
+    "BLM":        {"enabled": true, "notes": "Use MLRS bulk portal or state portals"},
+    "News":       {"enabled": true, "providers": ["Reuters","Bloomberg","FT","WSJ"]}
+  },
+  "ranking": {"relevance": 0.5, "recency": 0.3, "citation": 0.2},
+  "time_window_days": 60,
+  "min_citation_for_autopromote": 0.8
+}
