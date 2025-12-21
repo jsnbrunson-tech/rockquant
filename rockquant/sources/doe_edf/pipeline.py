@@ -147,4 +147,5 @@ def run_pipeline(db_path: str, config: dict) -> dict:
     signal_result = generate_signals(db_path)
     
     return {"status": "ok", "items_parsed": items_parsed, "events": total_events, "new_events": new_events, "signals": signal_result["signals"]}    finally:
+    finally:
         conn.close()
