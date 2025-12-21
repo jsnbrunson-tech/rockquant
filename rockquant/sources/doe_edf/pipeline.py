@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from .classify import classify_edf_subtype
 
 BASE = "https://www.energy.gov"
 HEADERS = {"User-Agent": "RockQuant/0.4"}
@@ -129,7 +130,8 @@ def run_pipeline(db_path: str, config: dict) -> dict:
                       title = excluded.title,
                       event_date = excluded.event_date,
                       url = excluded.url
-                """, (canonical_key, event_date, title, article_url, feed_name, "news", source_doc_id))
+                                          event_subtype = excluded.event_subtype
+                """, (canonical_key, event_date, title, article_url, classify_edf_subtype(title), "news", source_doc_id))
 
                 if not existed:
                     new_events += 1
