@@ -1,166 +1,145 @@
-from __future__ import annotations
-
 import hashlib
-import re
+import sqlite3
 import time
-import urllib.parse
+import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
+BASE = "https://www.energy.gov"
+HEADERS = {"User-Agent": "RockQuant/0.4"}
 
-BASE_URL = "https://www.energy.gov"
-HEADERS = {"User-Agent": "RockQuant/0.2"}
-
-MONTHS = (
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December"
+DATE_RE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b"
 )
-DATE_RE = re.compile(rf"^({'|'.join(MONTHS)})\s+\d{{1,2}},\s+\d{{4}}$")
 
-
-def canonical_key_from_url(url: str) -> str:
-    path = urllib.parse.urlparse(url).path.rstrip("/").lower() or "/"
-    return hashlib.sha256(f"doe|{path}".encode("utf-8")).hexdigest()
-
-
-def parse_listing(html: str) -> List[Dict[str, str]]:
-    """
-    Parse DOE listing pages (div.views-row) and return items:
-    published_date (ISO), title, url
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    items: List[Dict[str, str]] = []
-
-    for row in soup.select("div.views-row"):
-        date_raw: Optional[str] = None
-        for s in row.stripped_strings:
-            if DATE_RE.match(s):
-                date_raw = s
-                break
-        if not date_raw:
-            continue
-
-        # Convert date to ISO
-        published_date = datetime.strptime(date_raw, "%B %d, %Y").date().isoformat()
-
-        # Find first relevant article link
-        a = None
-        for cand in row.find_all("a", href=True):
-            href = cand["href"].strip()
-            if href.startswith("/articles/") or href.startswith("/lpo/articles/"):
-                a = cand
-                break
-        if not a:
-            continue
-
-        title = a.get_text(" ", strip=True)
-        if not title:
-            continue
-
-        url = urllib.parse.urljoin(BASE_URL, a["href"].strip())
-        items.append({"published_date": published_date, "title": title, "url": url})
-
-    # De-dupe by url, preserve order
-    seen = set()
-    out: List[Dict[str, str]] = []
-    for it in items:
-        if it["url"] in seen:
-            continue
-        seen.add(it["url"])
-        out.append(it)
-    return out
-
-
-def _normalize_feed_urls(feeds_cfg: Any) -> List[str]:
-    """
-    Supports:
-      - list[str] of listing URLs
-      - list[dict] with keys like list_url/url
-    """
-    urls: List[str] = []
-    if not feeds_cfg:
-        return urls
-
-    for f in feeds_cfg:
-        if isinstance(f, str):
-            urls.append(f)
-        elif isinstance(f, dict):
-            u = f.get("list_url") or f.get("url")
-            if u:
-                urls.append(u)
-    return urls
-
-
-def run_pipeline(db_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Bounded listing fetch + parse. Does NOT write to DB yet.
-    (This is intentionally minimal to prevent Colab hangs.)
-    """
-    feeds_cfg = config.get("feeds") or [
+def run_pipeline(db_path: str, config: dict) -> dict:
+    feeds = config.get("feeds") or [
         "https://www.energy.gov/lpo/listings/edf-news",
         "https://www.energy.gov/lpo/listings/lpo-press-releases",
     ]
-    feed_urls = _normalize_feed_urls(feeds_cfg)
-
-    max_pages = int(config.get("max_pages", 1))
-    max_items_per_page = int(config.get("max_items_per_page", 0))  # 0 means no limit
+    max_items = int(config.get("max_items_per_page", 10))
     rate_limit_s = float(config.get("rate_limit_s", 0.25))
-    timeout = config.get("timeout", (10, 30))  # (connect, read)
-    max_retries = int(config.get("max_retries", 2))
 
-    def fetch(session: requests.Session, url: str) -> requests.Response:
-        backoff = 2
-        for attempt in range(max_retries + 1):
-            try:
-                r = session.get(url, headers=HEADERS, timeout=timeout)
-            except requests.RequestException:
-                if attempt >= max_retries:
-                    raise
-                time.sleep(backoff)
-                backoff *= 2
+    conn = sqlite3.connect(db_path, timeout=60)
+    try:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 5000")
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.OperationalError:
+            pass
+
+        cur = conn.cursor()
+
+        items_parsed = 0
+        new_events = 0
+        skipped_no_link = 0
+        skipped_no_date = 0
+
+        # normalize feeds (strings or dicts)
+        feed_urls = []
+        for f in feeds:
+            if isinstance(f, str):
+                feed_urls.append((urlparse(f).path.split("/")[-1], f))
+            elif isinstance(f, dict):
+                feed_urls.append((f.get("name", "unknown"), f.get("list_url") or f.get("url")))
+
+        for feed_name, feed_url in feed_urls:
+            if not feed_url:
                 continue
 
-            # Retry only transient/throttle codes
-            if r.status_code in (429, 502, 503, 504):
-                if attempt >= max_retries:
-                    r.raise_for_status()
-                retry_after = r.headers.get("Retry-After")
-                sleep_s = int(retry_after) if (retry_after and retry_after.isdigit()) else backoff
-                time.sleep(sleep_s)
-                backoff *= 2
-                continue
-
+            r = requests.get(feed_url, headers=HEADERS, timeout=(10, 30))
+            print(f"[fetch] {feed_url}\n  status={r.status_code} bytes={len(r.content)}", flush=True)
             r.raise_for_status()
-            return r
 
-        raise RuntimeError("unreachable")
+            soup = BeautifulSoup(r.text, "html.parser")
+            rows = soup.select("div.views-row")[:max_items]
+            print(f"  parsed_items={len(rows)}", flush=True)
 
-    total_items = 0
-    session = requests.Session()
+            for row in rows:
+                # strict article link selection
+                article_href = None
+                title = None
+                for a in row.find_all("a", href=True):
+                    href = a["href"].strip()
+                    if href.startswith("/articles/") or href.startswith("/lpo/articles/"):
+                        article_href = href
+                        title = a.get_text(" ", strip=True)
+                        break
 
-    for feed in feed_urls:
-        for page in range(max_pages):
-            page_url = feed if page == 0 else f"{feed}?page={page}"
-            print(f"[fetch] {page_url}", flush=True)
+                if not article_href:
+                    skipped_no_link += 1
+                    continue
 
-            r = fetch(session, page_url)
-            print(f"  status={r.status_code} bytes={len(r.text)}", flush=True)
+                article_url = article_href if article_href.startswith("http") else (BASE + article_href)
+                title = (title or "").strip() or article_url
 
-            items = parse_listing(r.text)
-            if max_items_per_page > 0:
-                items = items[:max_items_per_page]
+                # exact date from row strings
+                date_str = None
+                for s in row.stripped_strings:
+                    m = DATE_RE.search(s)
+                    if m:
+                        date_str = m.group(0)
+                        break
+                if not date_str:
+                    skipped_no_date += 1
+                    continue
 
-            print(f"  parsed_items={len(items)}", flush=True)
-            total_items += len(items)
+                try:
+                    event_date = datetime.strptime(date_str, "%B %d, %Y").strftime("%Y-%m-%d")
+                except ValueError:
+                    skipped_no_date += 1
+                    continue
 
-            if len(items) == 0:
-                break
+                items_parsed += 1
 
-            time.sleep(rate_limit_s)
+                # upsert source_documents by article_url
+                cur.execute("""
+                    INSERT INTO source_documents (url, published_date, fetched_at)
+                    VALUES (?, ?, datetime('now'))
+                    ON CONFLICT(url) DO UPDATE SET
+                      published_date = excluded.published_date,
+                      fetched_at = excluded.fetched_at
+                """, (article_url, event_date))
 
-    return {"status": "ok", "items_parsed": total_items, "events": 0, "signals": 0}
+                source_doc_id = cur.execute(
+                    "SELECT id FROM source_documents WHERE url = ?",
+                    (article_url,)
+                ).fetchone()[0]
 
+                # canonical key = sha256("doe|" + normalized path)
+                p = urlparse(article_url)
+                url_path = (p.path.rstrip("/").lower() or "/")
+                canonical_key = hashlib.sha256(f"doe|{url_path}".encode("utf-8")).hexdigest()
 
+                existed = cur.execute(
+                    "SELECT 1 FROM events WHERE canonical_event_key = ?",
+                    (canonical_key,)
+                ).fetchone()
+
+                cur.execute("""
+                    INSERT INTO events (
+                      canonical_event_key, event_date, title, url,
+                      event_type, event_subtype, source_doc_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(canonical_event_key) DO UPDATE SET
+                      title = excluded.title,
+                      event_date = excluded.event_date,
+                      url = excluded.url
+                """, (canonical_key, event_date, title, article_url, feed_name, "news", source_doc_id))
+
+                if not existed:
+                    new_events += 1
+
+                time.sleep(rate_limit_s)
+
+        conn.commit()
+        total_events = cur.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+        print(f"  skipped: no_article_link={skipped_no_link}, no_date={skipped_no_date}", flush=True)
+
+        return {"status": "ok", "items_parsed": items_parsed, "events": total_events, "new_events": new_events, "signals": 0}
+    finally:
+        conn.close()
