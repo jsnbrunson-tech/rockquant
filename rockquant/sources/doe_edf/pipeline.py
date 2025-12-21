@@ -161,4 +161,6 @@ def run_pipeline(db_path: str, config: Dict[str, Any]) -> Dict[str, Any]:
 
             time.sleep(rate_limit_s)
 
-    return {"status": "ok", "items_parsed": total_items}
+    return {"status": "ok", "items_parsed": total_items, "events": 0, "signals": 0}
+
+
