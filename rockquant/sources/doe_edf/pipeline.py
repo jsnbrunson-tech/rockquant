@@ -131,8 +131,7 @@ def run_pipeline(db_path: str, config: dict) -> dict:
                       event_date = excluded.event_date,
                       url = excluded.url,
                                           event_subtype = excluded.event_subtype
-                """, (canonical_key, event_date, title, article_url, classify_edf_subtype(title), "news", source_doc_id))
-
+            """, (canonical_key, event_date, title, article_url, "news", classify_edf_subtype(title), source_doc_id))
                 if not existed:
                     new_events += 1
 
