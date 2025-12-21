@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import requests
 from bs4 import BeautifulSoup
 from .classify import classify_edf_subtype
+from .signals import generate_signals
 
 BASE = "https://www.energy.gov"
 HEADERS = {"User-Agent": "RockQuant/0.4"}
@@ -141,6 +142,9 @@ def run_pipeline(db_path: str, config: dict) -> dict:
         total_events = cur.execute("SELECT COUNT(*) FROM events").fetchone()[0]
         print(f"  skipped: no_article_link={skipped_no_link}, no_date={skipped_no_date}", flush=True)
 
-        return {"status": "ok", "items_parsed": items_parsed, "events": total_events, "new_events": new_events, "signals": 0}
-    finally:
+            
+    # Generate signals from events
+    signal_result = generate_signals(db_path)
+    
+    return {"status": "ok", "items_parsed": items_parsed, "events": total_events, "new_events": new_events, "signals": signal_result["signals"]}    finally:
         conn.close()
