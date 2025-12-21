@@ -129,7 +129,7 @@ def run_pipeline(db_path: str, config: dict) -> dict:
                     ON CONFLICT(canonical_event_key) DO UPDATE SET
                       title = excluded.title,
                       event_date = excluded.event_date,
-                      url = excluded.url
+                      url = excluded.url,
                                           event_subtype = excluded.event_subtype
                 """, (canonical_key, event_date, title, article_url, classify_edf_subtype(title), "news", source_doc_id))
 
