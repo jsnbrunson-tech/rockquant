@@ -1,0 +1,12 @@
+# Local runtime artifacts
+data/
+exports/
+*.db
+*.sqlite
+*.sqlite3
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+.DS_Store
